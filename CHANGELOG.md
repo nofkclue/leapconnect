@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Charging session cost override** — Save now sends and persists the entered total for both existing and newly assigned sessions, including €0 and sessions without measured energy. Clearing the field restores automatic tariff pricing. Covered by API/database regression tests and frontend component tests, which also run in CI.
+
 ## [0.12.0] - 2026-10-10
 
 ### Added

@@ -74,6 +74,13 @@ This outputs to `frontend/dist/`. The FastAPI backend will automatically serve t
 uv run pytest
 ```
 
+Frontend component tests:
+
+```bash
+cd frontend
+npm test
+```
+
 ## Code Quality
 
 Pre-commit hooks run automatically:
