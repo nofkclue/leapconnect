@@ -182,6 +182,13 @@ Traefik handles reverse proxying with HTTPS on port 443 and automatic HTTP→HTT
 
 Vehicle history data is persisted in a Docker volume (`app-data`).
 
+If the Leapmotor cloud connection fails at startup (for example while a VPN is
+still starting), LeapConnect retries in the background after 5 seconds. The delay
+doubles after each failed attempt, up to 5 minutes, until a connection succeeds.
+Vehicle recording resumes after a successful connection. Manual connection,
+disconnect and shutdown cancel pending retries; missing saved credentials or
+certificate files require setup and are not retried.
+
 ### HTTPS & Certificates
 
 The Docker Compose setup includes automatic TLS certificate generation. On first `docker compose up`, a one-shot init container generates a self-signed certificate with all local IP addresses in the SAN (Subject Alternative Name), so you can access the app via `https://<server-ip>` without certificate errors.

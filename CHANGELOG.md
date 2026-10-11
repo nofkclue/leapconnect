@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Automatic startup reconnection** — if connecting to the Leapmotor cloud at startup fails, retry in the background after 5 seconds with exponential backoff up to 5 minutes. Manual connection, disconnect and shutdown cancel pending retries. Successful retries resume normal vehicle recording without restarting the container. No database migration is required.
+
 ### Fixed
 - **Charging session cost override** — Save now sends and persists the entered total for both existing and newly assigned sessions, including €0 and sessions without measured energy. Clearing the field restores automatic tariff pricing. Covered by API/database regression tests and frontend component tests, which also run in CI.
 

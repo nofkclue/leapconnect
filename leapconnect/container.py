@@ -52,6 +52,9 @@ if TYPE_CHECKING:
 
 _LOGGER = logging.getLogger(__name__)
 
+_AUTO_CONNECT_INITIAL_DELAY = 5
+_AUTO_CONNECT_MAX_DELAY = 300
+
 
 class AppContainer:
     """All mutable application state plus lifecycle management."""
@@ -62,6 +65,7 @@ class AppContainer:
         self.client: AsyncLeapmotorApiClient | None = None
         self.vehicles: list[Vehicle] = []
         self.connected: bool = False
+        self._auto_connect_task: asyncio.Task | None = None
 
         # Services (created in startup())
         self.repo: SqlAlchemyRepository | None = None
@@ -214,6 +218,25 @@ class AppContainer:
         key_path: str,
         p12_password: str | None = None,
     ) -> list[Vehicle]:
+        """Connect manually, taking over from any pending startup retry."""
+        await self._stop_auto_connect()
+        return await self._connect(
+            username=username,
+            password=password,
+            cert_path=cert_path,
+            key_path=key_path,
+            p12_password=p12_password,
+        )
+
+    async def _connect(
+        self,
+        *,
+        username: str,
+        password: str,
+        cert_path: str,
+        key_path: str,
+        p12_password: str | None = None,
+    ) -> list[Vehicle]:
         """Connect to the Leapmotor cloud; wires scheduler/ABRP/live-refresh.
 
         On failure the connection state is reset and the exception re-raised.
@@ -246,7 +269,9 @@ class AppContainer:
             if self.live_refresh_interval > 0:
                 self.start_live_refresh()
             return self.vehicles
-        except Exception:
+        except (Exception, asyncio.CancelledError):
+            with suppress(Exception):
+                self._close_sync_client()
             self.reset_connection()
             raise
 
@@ -270,41 +295,89 @@ class AppContainer:
             self.scheduler.set_client(None, [])
 
     async def auto_connect(self) -> None:
-        """Try to connect using saved credentials at startup."""
+        """Connect at startup; retry failures in the background with backoff."""
+        await self._stop_auto_connect()
+        if not await self._try_auto_connect():
+            self._auto_connect_task = asyncio.create_task(
+                self._auto_connect_loop(), name="cloud-auto-connect"
+            )
+
+    def _cancel_auto_connect(self) -> asyncio.Task | None:
+        task = self._auto_connect_task
+        if task and not task.done():
+            task.cancel()
+        return task
+
+    async def _stop_auto_connect(self) -> None:
+        task = self._cancel_auto_connect()
+        if task:
+            with suppress(asyncio.CancelledError):
+                await task
+            if self._auto_connect_task is task:
+                self._auto_connect_task = None
+
+    async def _auto_connect_loop(self) -> None:
+        delay = _AUTO_CONNECT_INITIAL_DELAY
+        try:
+            while True:
+                _LOGGER.info("Auto-connect: retrying in %d seconds", delay)
+                await asyncio.sleep(delay)
+                if await self._try_auto_connect():
+                    return
+                delay = min(delay * 2, _AUTO_CONNECT_MAX_DELAY)
+        finally:
+            if self._auto_connect_task is asyncio.current_task():
+                self._auto_connect_task = None
+
+    async def _try_auto_connect(self) -> bool:
+        """Return True when connected or no saved configuration can be retried.
+
+        Reload credentials on each attempt so saved account changes take effect.
+        Missing credentials/certificates require setup, so they are not retried.
+        """
+        if self.connected:
+            return True
         if not self.repo:
-            return
-
-        account = await self.repo.get_account()
-        if not account:
-            _LOGGER.info("Auto-connect: no saved account, skipping")
-            return
-
-        cert_path = account["cert_path"]
-        key_path = account["key_path"]
-        if not Path(cert_path).is_file() or not Path(key_path).is_file():
-            _LOGGER.warning("Auto-connect: certificate files missing, skipping")
-            return
+            return True
 
         try:
-            await self.connect(
+            account = await self.repo.get_account()
+            if not account:
+                _LOGGER.info("Auto-connect: no saved account, skipping")
+                return True
+
+            cert_path = account["cert_path"]
+            key_path = account["key_path"]
+            if not Path(cert_path).is_file() or not Path(key_path).is_file():
+                _LOGGER.warning("Auto-connect: certificate files missing, skipping")
+                return True
+
+            await self._connect(
                 username=account["username"],
                 password=account["password"],
                 cert_path=cert_path,
                 key_path=key_path,
                 p12_password=account.get("p12_password"),
             )
-            _LOGGER.info("Auto-connect: success, %d vehicle(s)", len(self.vehicles))
+        except Exception as exc:
+            _LOGGER.warning("Auto-connect: failed (%s), app will run offline", exc)
+            return False
 
+        _LOGGER.info("Auto-connect: success, %d vehicle(s)", len(self.vehicles))
+        try:
             # Restore saved vehicle PIN for MQTT commands
             saved_pin = await self.repo.get_setting("mqtt_vehicle_pin")
             if saved_pin and self.sync_client:
                 self.sync_client.operation_password = saved_pin
                 _LOGGER.info("Auto-connect: vehicle PIN restored from DB")
         except Exception as exc:
-            _LOGGER.warning("Auto-connect: failed (%s), app will run offline", exc)
+            # A PIN restore failure must not repeat an already successful login.
+            _LOGGER.warning("Auto-connect: could not restore vehicle PIN (%s)", exc)
+        return True
 
     def disconnect(self) -> None:
         """Disconnect from the Leapmotor cloud without clearing session."""
+        self._cancel_auto_connect()
         self.stop_live_refresh()
         if self.abrp_service:
             self.abrp_service.set_vehicles([], None)
@@ -669,6 +742,7 @@ class AppContainer:
             await self.hemisphere_memory.save(self.sync_client.hemisphere_guard)
 
     async def shutdown(self) -> None:
+        await self._stop_auto_connect()
         self.stop_live_refresh()
         if self.disk_monitor:
             await self.disk_monitor.stop()
